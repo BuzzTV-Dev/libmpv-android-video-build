@@ -42,7 +42,7 @@ cpuflags=
 	--enable-demuxers \
 	--enable-parsers \
 	\
-	--disable-muxers \
+	--enable-muxers \
 	--disable-encoders \
 	--disable-protocols \
 	--disable-devices \

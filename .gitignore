@@ -10,3 +10,5 @@ obj
 build
 local.properties
 *~
+output
+buildscripts/debug-symbols-full.zip
