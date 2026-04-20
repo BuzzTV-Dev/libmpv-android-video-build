@@ -1,10 +1,9 @@
 # --------------------------------------------------
-set -euxo pipefail
 
-if [ -d "deps" ]; then
+if [ ! -f "deps" ]; then
   sudo rm -r deps
 fi
-if [ -d "prefix" ]; then
+if [ ! -f "prefix" ]; then
   sudo rm -r prefix
 fi
 
@@ -13,7 +12,7 @@ fi
 
 # --------------------------------------------------
 
-if [ -f "scripts/ffmpeg" ]; then
+if [ ! -f "scripts/ffmpeg" ]; then
   rm scripts/ffmpeg.sh
 fi
 cp flavors/full.sh scripts/ffmpeg.sh
@@ -21,14 +20,6 @@ cp flavors/full.sh scripts/ffmpeg.sh
 # --------------------------------------------------
 
 ./build.sh
-
-zip -r debug-symbols-full.zip prefix/*/lib
-
-. ./include/depinfo.sh
-./sdk/android-sdk-linux/ndk/$v_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all prefix/arm64-v8a/usr/local/lib/libmpv.so
-./sdk/android-sdk-linux/ndk/$v_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all prefix/armeabi-v7a/usr/local/lib/libmpv.so
-./sdk/android-sdk-linux/ndk/$v_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all prefix/x86/usr/local/lib/libmpv.so
-./sdk/android-sdk-linux/ndk/$v_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip --strip-all prefix/x86_64/usr/local/lib/libmpv.so
 
 # --------------------------------------------------
 
@@ -39,21 +30,32 @@ sudo chmod +x gradlew
 
 unzip -o app/build/outputs/apk/release/app-release.apk -d app/build/outputs/apk/release
 
-cp ../../prefix/arm64-v8a/usr/local/lib/libmpv.so      app/build/outputs/apk/release/lib/arm64-v8a
-cp ../../prefix/armeabi-v7a/usr/local/lib/libmpv.so    app/build/outputs/apk/release/lib/armeabi-v7a
-cp ../../prefix/x86/usr/local/lib/libmpv.so            app/build/outputs/apk/release/lib/x86
-cp ../../prefix/x86_64/usr/local/lib/libmpv.so         app/build/outputs/apk/release/lib/x86_64
+cp app/build/outputs/apk/release/lib/arm64-v8a/libmediakitandroidhelper.so      ../../prefix/arm64-v8a/usr/local/lib
+cp app/build/outputs/apk/release/lib/armeabi-v7a/libmediakitandroidhelper.so    ../../prefix/armeabi-v7a/usr/local/lib
+cp app/build/outputs/apk/release/lib/x86/libmediakitandroidhelper.so            ../../prefix/x86/usr/local/lib
+cp app/build/outputs/apk/release/lib/x86_64/libmediakitandroidhelper.so         ../../prefix/x86_64/usr/local/lib
 
-cd app/build/outputs/apk/release
+cd ../..
 
-zip -r full-arm64-v8a.jar      lib/arm64-v8a/*.so
-zip -r full-armeabi-v7a.jar    lib/armeabi-v7a/*.so
-zip -r full-x86.jar            lib/x86/*.so
-zip -r full-x86_64.jar         lib/x86_64/*.so
+mkdir -p temp/lib/arm64-v8a
+mkdir -p temp/lib/armeabi-v7a
+mkdir -p temp/lib/x86
+mkdir -p temp/lib/x86_64
+
+cp prefix/arm64-v8a/usr/local/lib/*.so temp/lib/arm64-v8a/
+cp prefix/armeabi-v7a/usr/local/lib/*.so temp/lib/armeabi-v7a/
+cp prefix/x86/usr/local/lib/*.so temp/lib/x86/
+cp prefix/x86_64/usr/local/lib/*.so temp/lib/x86_64/
+
+cd temp
+
+zip -r ../full-arm64-v8a.jar lib/arm64-v8a
+zip -r ../full-armeabi-v7a.jar lib/armeabi-v7a
+zip -r ../full-x86.jar lib/x86
+zip -r ../full-x86_64.jar lib/x86_64
+
+cd ../
+
+pwd
 
 md5sum *.jar
-
-cd ../../../../../../..
-
-mkdir -p artifacts/full
-cp deps/media-kit-android-helper/app/build/outputs/apk/release/full-*.jar artifacts/full/

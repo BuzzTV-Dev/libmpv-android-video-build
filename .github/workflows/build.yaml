@@ -4,13 +4,18 @@ on:
   push:
     branches:
       - main
-  pull_request:
   workflow_dispatch:
     inputs:
       logLevel:
         description: 'Log level'
         required: true
         default: 'warning'
+      release:
+        description: 'Create draft release'
+        required: false
+        type: boolean
+        default: false
+  pull_request:
 
 permissions:
   contents: write
@@ -18,17 +23,30 @@ permissions:
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    container: docker.io/debian:bookworm-slim
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Setup Java JDK
+      - name: Install dependency
+        run: |
+          echo "deb http://deb.debian.org/debian bookworm-backports main" | tee /etc/apt/sources.list.d/bookworm-backports.list
+          apt update
+          apt install -y sudo git gcc-multilib libc-dev make automake pkg-config libtool nasm python3-jsonschema wget python3-jinja2 zip python3-pip
+          apt install -y -t bookworm-backports meson
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: 17
+          java-version: '17'
+          distribution: 'temurin'
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v3
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - uses: nttld/setup-ndk@v1
+        with:
+          link-to-sdk: true
+          ndk-version: r27c
       - name: Symlink SDK
         working-directory: ./buildscripts
         run: |
@@ -37,32 +55,21 @@ jobs:
       - name: Bundle (default)
         working-directory: ./buildscripts
         run: |
+          sed -i -e 's/sudo//g' *.sh
+          sed -i 's/download-sdk\.sh/download-sdk-debian\.sh/g' download.sh
+          sed -i -e '/git reset --hard/d' patch.sh
+          sudo chmod +x include/download-sdk-debian.sh
           sudo chmod +x bundle_default.sh
           ./bundle_default.sh
-      - name: Bundle (full)
-        working-directory: ./buildscripts
-        run: |
-          sudo chmod +x bundle_full.sh
-          ./bundle_full.sh
-      - name: Bundle (encoders-gpl)
-        working-directory: ./buildscripts
-        run: |
-          sudo chmod +x bundle_encoders-gpl.sh
-          ./bundle_encoders-gpl.sh
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: artifact
-          path: |
-            ./buildscripts/*.jar
-            ./buildscripts/artifacts/**
-      - name: Upload Release
-        uses: softprops/action-gh-release@v1
-        if: github.ref == 'refs/heads/main'
+          path: /home/runner/work/libmpv-android-video-build/libmpv-android-video-build/buildscripts/*.jar
+      - uses: softprops/action-gh-release@v1
+        if: github.ref == 'refs/heads/main' || inputs.release == true
         with:
           draft: true
           prerelease: false
           tag_name: "vnext"
           files: |
-            buildscripts/*.zip
-            buildscripts/artifacts/**
+            /home/runner/work/libmpv-android-video-build/libmpv-android-video-build/buildscripts/*.jar

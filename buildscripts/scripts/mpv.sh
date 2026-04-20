@@ -16,16 +16,19 @@ fi
 
 unset CC CXX # meson wants these unset
 
+sed -i -e "s/meson.build_options()/''/" meson.build
+
 meson setup $build --cross-file "$prefix_dir"/crossfile.txt \
+	--strip \
 	--prefer-static \
 	--default-library shared \
 	-Dgpl=false \
 	-Dlibmpv=true \
+	-Dbuild-date=false \
  	-Dlua=disabled \
  	-Dcplayer=false \
 	-Diconv=disabled \
-	-Dvulkan=disabled \
-   	-Dlibplacebo=disabled \
+	-Dvulkan=enabled \
  	-Dmanpage-build=disabled
 
 ninja -C $build -j$cores
