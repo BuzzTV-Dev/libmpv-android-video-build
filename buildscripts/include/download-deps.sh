@@ -28,7 +28,7 @@ mkdir -p deps && cd deps
 [ ! -d libx264 ] && git clone https://code.videolan.org/videolan/x264.git libx264 && cd libx264 && git reset --hard 023112c6f2f575c72e9f26274d183b70996fb542 && cd ..
 
 # ffmpeg
-[ ! -d ffmpeg ] && git clone --depth 1 --branch release/$v_ffmpeg https://github.com/FFmpeg/FFmpeg.git ffmpeg
+[ ! -d ffmpeg ] && git clone --depth 1 --branch release/$v_ffmpeg https://github.com/FFmpeg/FFmpeg.git ffmpeg && cd ffmpeg && git fetch --depth 1 origin $v_ffmpeg_commit && git reset --hard $v_ffmpeg_commit && cd ..
 
 # freetype2
 [ ! -d freetype ] && git clone --depth 1 --branch VER-$v_freetype https://gitlab.freedesktop.org/freetype/freetype.git freetype

@@ -14,6 +14,7 @@ v_mbedtls=3.4.0
 v_dav1d=1.2.0
 v_libxml2=2.10.3
 v_ffmpeg=7.1
+v_ffmpeg_commit=2d6ee37238998d7731f76199891222c6e1e8f89f
 v_mpv=32a164cc017acab50389f2194f720ccfd0b01a28
 v_libplacebo=7.360.1
 v_lcms2=lcms2.17
