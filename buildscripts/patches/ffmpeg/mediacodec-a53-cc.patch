@@ -1,0 +1,247 @@
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+index cc55b30..4d23ec9 100644
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -34,16 +34,29 @@
+ #include "libavutil/internal.h"
+ 
+ #include "avcodec.h"
++#include "bytestream.h"
+ #include "codec_internal.h"
+ #include "decode.h"
++#include "h264.h"
+ #include "h264_parse.h"
+ #include "h264_ps.h"
++#include "h2645_parse.h"
++#include "h2645_sei.h"
++#include "hevc/hevc.h"
+ #include "hevc/parse.h"
+ #include "hwconfig.h"
+ #include "internal.h"
+ #include "jni.h"
+ #include "mediacodec_wrapper.h"
+ #include "mediacodecdec_common.h"
++#include "sei.h"
++
++#define MEDIACODEC_A53_QUEUE_SIZE 32
++
++typedef struct MediaCodecA53Entry {
++    int64_t pts;
++    AVBufferRef *buf;
++} MediaCodecA53Entry;
+ 
+ typedef struct MediaCodecH264DecContext {
+ 
+@@ -57,8 +70,147 @@ typedef struct MediaCodecH264DecContext {
+     int amlogic_mpeg2_api23_workaround;
+ 
+     int use_ndk_codec;
++
++    /* A/53 closed captions extracted from H.264/HEVC SEI, in decode order,
++     * waiting to be attached to the matching output frame. */
++    MediaCodecA53Entry a53_queue[MEDIACODEC_A53_QUEUE_SIZE];
++    int a53_queue_len;
++    H2645Packet a53_h2645_pkt;
+ } MediaCodecH264DecContext;
+ 
++static void mediacodec_a53_flush(MediaCodecH264DecContext *s)
++{
++    int i;
++
++    for (i = 0; i < s->a53_queue_len; i++)
++        av_buffer_unref(&s->a53_queue[i].buf);
++    s->a53_queue_len = 0;
++}
++
++#if CONFIG_H264_MEDIACODEC_DECODER || CONFIG_HEVC_MEDIACODEC_DECODER
++static void mediacodec_a53_extract(AVCodecContext *avctx, const AVPacket *pkt)
++{
++    MediaCodecH264DecContext *s = avctx->priv_data;
++    H2645SEI sei = { 0 };
++    int i, ret;
++
++    if (pkt->pts == AV_NOPTS_VALUE)
++        return;
++
++    /* The h264_mp4toannexb/hevc_mp4toannexb bsfs guarantee Annex B input. */
++    ret = ff_h2645_packet_split(&s->a53_h2645_pkt, pkt->data, pkt->size,
++                                avctx, 0, avctx->codec_id,
++                                H2645_FLAG_SMALL_PADDING);
++    if (ret < 0)
++        return;
++
++    for (i = 0; i < s->a53_h2645_pkt.nb_nals; i++) {
++        const H2645NAL *nal = &s->a53_h2645_pkt.nals[i];
++        GetByteContext gbyte;
++        int header_size;
++
++        if (avctx->codec_id == AV_CODEC_ID_H264) {
++            if (nal->type != H264_NAL_SEI)
++                continue;
++            header_size = 1;
++        } else {
++            if (nal->type != HEVC_NAL_SEI_PREFIX &&
++                nal->type != HEVC_NAL_SEI_SUFFIX)
++                continue;
++            header_size = 2;
++        }
++
++        if (nal->size <= header_size)
++            continue;
++
++        bytestream2_init(&gbyte, nal->data + header_size,
++                         nal->size - header_size);
++
++        while (bytestream2_get_bytes_left(&gbyte) > 2) {
++            int type = 0, size = 0, b;
++
++            do {
++                b = bytestream2_get_byte(&gbyte);
++                type += b;
++            } while (b == 0xFF && bytestream2_get_bytes_left(&gbyte) > 0);
++
++            do {
++                b = bytestream2_get_byte(&gbyte);
++                size += b;
++            } while (b == 0xFF && bytestream2_get_bytes_left(&gbyte) > 0);
++
++            if (size <= 0 || size > bytestream2_get_bytes_left(&gbyte))
++                break;
++
++            if (type == SEI_TYPE_USER_DATA_REGISTERED_ITU_T_T35) {
++                GetByteContext payload;
++                bytestream2_init(&payload, gbyte.buffer, size);
++                ff_h2645_sei_message_decode(&sei, type, avctx->codec_id,
++                                            NULL, &payload, avctx);
++            }
++
++            bytestream2_skip(&gbyte, size);
++        }
++    }
++
++    if (sei.a53_caption.buf_ref) {
++        MediaCodecA53Entry *entry;
++
++        if (s->a53_queue_len >= MEDIACODEC_A53_QUEUE_SIZE) {
++            av_buffer_unref(&s->a53_queue[0].buf);
++            memmove(&s->a53_queue[0], &s->a53_queue[1],
++                    (MEDIACODEC_A53_QUEUE_SIZE - 1) * sizeof(s->a53_queue[0]));
++            s->a53_queue_len--;
++        }
++
++        entry = &s->a53_queue[s->a53_queue_len++];
++        entry->pts = pkt->pts;
++        entry->buf = sei.a53_caption.buf_ref;
++        sei.a53_caption.buf_ref = NULL;
++    }
++
++    ff_h2645_sei_reset(&sei);
++}
++
++static void mediacodec_a53_attach(AVCodecContext *avctx, AVFrame *frame)
++{
++    MediaCodecH264DecContext *s = avctx->priv_data;
++    MediaCodecA53Entry *entry;
++    int64_t best_delta = INT64_MAX;
++    int64_t tolerance = 0;
++    int i, best = -1;
++
++    if (!s->a53_queue_len || frame->pts == AV_NOPTS_VALUE)
++        return;
++
++    /* pts round-trips through microseconds inside MediaCodec, so allow a
++     * small mismatch (well below one frame duration). */
++    if (avctx->pkt_timebase.num && avctx->pkt_timebase.den)
++        tolerance = av_rescale_q(1, av_make_q(1, 100), avctx->pkt_timebase);
++
++    for (i = 0; i < s->a53_queue_len; i++) {
++        int64_t delta = FFABS(frame->pts - s->a53_queue[i].pts);
++        if (delta < best_delta) {
++            best_delta = delta;
++            best = i;
++        }
++    }
++
++    if (best < 0 || best_delta > tolerance)
++        return;
++
++    entry = &s->a53_queue[best];
++    if (av_frame_new_side_data_from_buf(frame, AV_FRAME_DATA_A53_CC, entry->buf))
++        avctx->properties |= FF_CODEC_PROPERTY_CLOSED_CAPTIONS;
++    else
++        av_buffer_unref(&entry->buf);
++
++    memmove(&s->a53_queue[best], &s->a53_queue[best + 1],
++            (s->a53_queue_len - best - 1) * sizeof(s->a53_queue[0]));
++    s->a53_queue_len--;
++}
++#endif
++
+ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+ {
+     MediaCodecH264DecContext *s = avctx->priv_data;
+@@ -68,6 +220,11 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+ 
+     av_packet_unref(&s->buffered_pkt);
+ 
++    mediacodec_a53_flush(s);
++#if CONFIG_H264_MEDIACODEC_DECODER || CONFIG_HEVC_MEDIACODEC_DECODER
++    ff_h2645_packet_uninit(&s->a53_h2645_pkt);
++#endif
++
+     return 0;
+ }
+ 
+@@ -487,7 +644,7 @@ done:
+     return ret;
+ }
+ 
+-static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
++static int mediacodec_receive_frame_internal(AVCodecContext *avctx, AVFrame *frame)
+ {
+     MediaCodecH264DecContext *s = avctx->priv_data;
+     int ret;
+@@ -554,6 +711,14 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+ 
+         /* fetch new packet or eof */
+         ret = ff_decode_get_packet(avctx, &s->buffered_pkt);
++
++#if CONFIG_H264_MEDIACODEC_DECODER || CONFIG_HEVC_MEDIACODEC_DECODER
++        if (ret >= 0 && s->buffered_pkt.size > 0 &&
++            (avctx->codec_id == AV_CODEC_ID_H264 ||
++             avctx->codec_id == AV_CODEC_ID_HEVC))
++            mediacodec_a53_extract(avctx, &s->buffered_pkt);
++#endif
++
+         if (ret == AVERROR_EOF) {
+             AVPacket null_pkt = { 0 };
+             ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
+@@ -570,12 +735,28 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+     return AVERROR(EAGAIN);
+ }
+ 
++static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
++{
++    int ret = mediacodec_receive_frame_internal(avctx, frame);
++
++#if CONFIG_H264_MEDIACODEC_DECODER || CONFIG_HEVC_MEDIACODEC_DECODER
++    if (ret == 0 &&
++        (avctx->codec_id == AV_CODEC_ID_H264 ||
++         avctx->codec_id == AV_CODEC_ID_HEVC))
++        mediacodec_a53_attach(avctx, frame);
++#endif
++
++    return ret;
++}
++
+ static void mediacodec_decode_flush(AVCodecContext *avctx)
+ {
+     MediaCodecH264DecContext *s = avctx->priv_data;
+ 
+     av_packet_unref(&s->buffered_pkt);
+ 
++    mediacodec_a53_flush(s);
++
+     ff_mediacodec_dec_flush(avctx, s->ctx);
+ }
+ 

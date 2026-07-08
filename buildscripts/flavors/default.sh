@@ -132,6 +132,7 @@ sed -i -e 's/#define FFMPEG_CONFIGURATION.*/#define FFMPEG_CONFIGURATION ""/' ..
 	\
 	--enable-decoder=ssa \
 	--enable-decoder=ass \
+	--enable-decoder=ccaption \
 	--enable-decoder=dvbsub \
 	--enable-decoder=dvdsub \
 	--enable-decoder=srt \
