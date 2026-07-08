@@ -12,3 +12,4 @@ local.properties
 *~
 output
 buildscripts/debug-symbols-full.zip
+.claude/settings.local.json
