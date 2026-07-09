@@ -1,0 +1,40 @@
+diff --git a/sub/sd_ass.c b/sub/sd_ass.c
+index ece372a231..d3b9d926ec 100644
+--- a/sub/sd_ass.c
++++ b/sub/sd_ass.c
+@@ -482,19 +482,26 @@ static void decode(struct sd *sd, struct demux_packet *packet)
+             };
+             filter_and_add(sd, &pkt2);
+         }
++        // Close all outstanding events with unknown duration, not just the
++        // most recent start-group. Realtime EIA-608 events all arrive with
++        // unknown duration and are only ever terminated here; leaving one
++        // behind keeps it on screen for UNKNOWN_DURATION (~25 days).
+         for (int n = track->n_events - 1; n >= 0; n--) {
+             if (track->events[track->n_events - 1].Start == track->events[n].Start)
+                 continue;
+-            if (track->events[n].Duration == UNKNOWN_DURATION * 1000) {
+-                if (track->events[n].Start < track->events[n + 1].Start) {
+-                    track->events[n].Duration = track->events[n + 1].Start -
+-                                                track->events[n].Start;
+-                } else if (track->events[n].Start == track->events[n + 1].Start) {
+-                    track->events[n].Duration = track->events[n + 1].Duration;
+-                }
+-            }
+-            if (n > 0 && track->events[n].Start != track->events[n - 1].Start)
++            if (track->events[n].Duration != UNKNOWN_DURATION * 1000)
+                 break;
++            if (track->events[n].Start < track->events[n + 1].Start) {
++                track->events[n].Duration = track->events[n + 1].Start -
++                                            track->events[n].Start;
++            } else if (track->events[n].Start == track->events[n + 1].Start) {
++                track->events[n].Duration = track->events[n + 1].Duration;
++            } else {
++                // The following event starts *before* this one (non-monotonic
++                // PTS, e.g. duplicated closed caption packets). This event has
++                // been superseded; end it instead of leaving it up forever.
++                track->events[n].Duration = 0;
++            }
+         }
+     } else {
+         // Note that for this packet format, libass has an internal mechanism
