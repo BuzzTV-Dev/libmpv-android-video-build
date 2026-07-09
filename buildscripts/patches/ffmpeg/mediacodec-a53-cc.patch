@@ -1,5 +1,5 @@
 diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
-index ea9362b..b0f5d03 100644
+index ea9362b..7ca7ecb 100644
 --- a/libavcodec/mediacodecdec.c
 +++ b/libavcodec/mediacodecdec.c
 @@ -34,16 +34,29 @@
@@ -32,7 +32,7 @@ index ea9362b..b0f5d03 100644
  
  typedef struct MediaCodecH264DecContext {
  
-@@ -59,8 +72,168 @@ typedef struct MediaCodecH264DecContext {
+@@ -59,8 +72,183 @@ typedef struct MediaCodecH264DecContext {
      int use_ndk_codec;
      // Ref. MediaFormat KEY_OPERATING_RATE
      int operating_rate;
@@ -41,6 +41,11 @@ index ea9362b..b0f5d03 100644
 +     * waiting to be attached to the matching output frame. */
 +    MediaCodecA53Entry a53_queue[MEDIACODEC_A53_QUEUE_SIZE];
 +    int a53_queue_len;
++    /* pts of the last frame that got cc attached; frames output with an
++     * older pts (1080i live streams) must not get cc, or the caption
++     * decoder sees non-monotonic input and duplicates/sticks events. */
++    int64_t a53_last_attached_pts;
++    int a53_have_last_attached;
 +    H2645Packet a53_h2645_pkt;
  } MediaCodecH264DecContext;
  
@@ -51,6 +56,7 @@ index ea9362b..b0f5d03 100644
 +    for (i = 0; i < s->a53_queue_len; i++)
 +        av_buffer_unref(&s->a53_queue[i].buf);
 +    s->a53_queue_len = 0;
++    s->a53_have_last_attached = 0;
 +}
 +
 +#if CONFIG_H264_MEDIACODEC_DECODER || CONFIG_HEVC_MEDIACODEC_DECODER
@@ -156,6 +162,13 @@ index ea9362b..b0f5d03 100644
 +    if (!s->a53_queue_len || frame->pts == AV_NOPTS_VALUE)
 +        return;
 +
++    if (s->a53_have_last_attached && frame->pts < s->a53_last_attached_pts) {
++        av_log(avctx, AV_LOG_DEBUG,
++               "a53: frame pts %"PRId64" older than last attached pts %"PRId64", skipping cc attach\n",
++               frame->pts, s->a53_last_attached_pts);
++        return;
++    }
++
 +    /* pts round-trips through microseconds inside MediaCodec, so allow a
 +     * small mismatch (well below one frame duration). */
 +    if (avctx->pkt_timebase.num && avctx->pkt_timebase.den)
@@ -188,6 +201,8 @@ index ea9362b..b0f5d03 100644
 +               "a53: attached %d cc bytes to frame pts %"PRId64" (delta %"PRId64"): %s\n",
 +               (int)sd->size, frame->pts, best_delta, hex);
 +        avctx->properties |= FF_CODEC_PROPERTY_CLOSED_CAPTIONS;
++        s->a53_last_attached_pts = frame->pts;
++        s->a53_have_last_attached = 1;
 +    } else {
 +        av_buffer_unref(&entry->buf);
 +    }
@@ -201,7 +216,7 @@ index ea9362b..b0f5d03 100644
  static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
  {
      MediaCodecH264DecContext *s = avctx->priv_data;
-@@ -70,6 +243,11 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+@@ -70,6 +258,11 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
  
      av_packet_unref(&s->buffered_pkt);
  
@@ -213,7 +228,7 @@ index ea9362b..b0f5d03 100644
      return 0;
  }
  
-@@ -486,7 +664,7 @@ done:
+@@ -486,7 +679,7 @@ done:
      return ret;
  }
  
@@ -222,7 +237,7 @@ index ea9362b..b0f5d03 100644
  {
      MediaCodecH264DecContext *s = avctx->priv_data;
      int ret;
-@@ -553,6 +731,14 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+@@ -553,6 +746,14 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
  
          /* fetch new packet or eof */
          ret = ff_decode_get_packet(avctx, &s->buffered_pkt);
@@ -237,7 +252,7 @@ index ea9362b..b0f5d03 100644
          if (ret == AVERROR_EOF) {
              AVPacket null_pkt = { 0 };
              ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
-@@ -569,12 +755,28 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+@@ -569,12 +770,28 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
      return AVERROR(EAGAIN);
  }
  
