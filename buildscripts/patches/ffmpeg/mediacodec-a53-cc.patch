@@ -1,5 +1,5 @@
 diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
-index cc55b30..63f40bc 100644
+index ea9362b..b0f5d03 100644
 --- a/libavcodec/mediacodecdec.c
 +++ b/libavcodec/mediacodecdec.c
 @@ -34,16 +34,29 @@
@@ -32,10 +32,10 @@ index cc55b30..63f40bc 100644
  
  typedef struct MediaCodecH264DecContext {
  
-@@ -57,8 +70,168 @@ typedef struct MediaCodecH264DecContext {
-     int amlogic_mpeg2_api23_workaround;
- 
+@@ -59,8 +72,168 @@ typedef struct MediaCodecH264DecContext {
      int use_ndk_codec;
+     // Ref. MediaFormat KEY_OPERATING_RATE
+     int operating_rate;
 +
 +    /* A/53 closed captions extracted from H.264/HEVC SEI, in decode order,
 +     * waiting to be attached to the matching output frame. */
@@ -201,7 +201,7 @@ index cc55b30..63f40bc 100644
  static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
  {
      MediaCodecH264DecContext *s = avctx->priv_data;
-@@ -68,6 +241,11 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+@@ -70,6 +243,11 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
  
      av_packet_unref(&s->buffered_pkt);
  
@@ -213,7 +213,7 @@ index cc55b30..63f40bc 100644
      return 0;
  }
  
-@@ -487,7 +665,7 @@ done:
+@@ -486,7 +664,7 @@ done:
      return ret;
  }
  
@@ -222,7 +222,7 @@ index cc55b30..63f40bc 100644
  {
      MediaCodecH264DecContext *s = avctx->priv_data;
      int ret;
-@@ -554,6 +732,14 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+@@ -553,6 +731,14 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
  
          /* fetch new packet or eof */
          ret = ff_decode_get_packet(avctx, &s->buffered_pkt);
@@ -237,7 +237,7 @@ index cc55b30..63f40bc 100644
          if (ret == AVERROR_EOF) {
              AVPacket null_pkt = { 0 };
              ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
-@@ -570,12 +756,28 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+@@ -569,12 +755,28 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
      return AVERROR(EAGAIN);
  }
  

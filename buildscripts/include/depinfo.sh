@@ -6,21 +6,21 @@ v_sdk=9123335_latest
 v_ndk=27.2.12479018
 v_sdk_build_tools=34.0.0
 
-v_libass=0.17.1
-v_harfbuzz=7.2.0
-v_fribidi=1.0.12
-v_freetype=2-13-0
-v_mbedtls=3.4.0
-v_dav1d=1.2.0
-v_libxml2=2.10.3
-v_ffmpeg=7.1
-v_ffmpeg_commit=2d6ee37238998d7731f76199891222c6e1e8f89f
-v_mpv=32a164cc017acab50389f2194f720ccfd0b01a28
+v_libass=0.17.5
+v_harfbuzz=14.2.1
+v_fribidi=1.0.16
+v_freetype=2-14-3
+v_mbedtls=3.6.7
+v_dav1d=1.5.3
+v_libxml2=2.15.3
+v_ffmpeg=8.1
+v_ffmpeg_commit=38b88335f99e76ed89ff3c93f877fdefce736c13
+v_mpv=41f6a645068483470267271e1d09966ca3b9f413
 v_libplacebo=7.360.1
-v_lcms2=lcms2.17
-v_libogg=1.3.5
+v_lcms2=lcms2.19.1
+v_libogg=1.3.6
 v_libvorbis=1.3.7
-v_libvpx=1.13.0
+v_libvpx=1.15.2
 
 
 ## Dependency tree

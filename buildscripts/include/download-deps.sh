@@ -7,7 +7,7 @@
 mkdir -p deps && cd deps
 
 # mbedtls
-[ ! -d mbedtls ] && git clone --depth 1 --branch v$v_mbedtls https://github.com/Mbed-TLS/mbedtls.git mbedtls
+[ ! -d mbedtls ] && git clone --depth 1 --branch v$v_mbedtls --recurse-submodules --shallow-submodules https://github.com/Mbed-TLS/mbedtls.git mbedtls
 
 # dav1d
 [ ! -d dav1d ] && git clone --depth 1 --branch $v_dav1d https://code.videolan.org/videolan/dav1d.git dav1d
@@ -25,7 +25,7 @@ mkdir -p deps && cd deps
 [ ! -d libvpx ] && git clone --depth 1 --branch v$v_libvpx https://gitlab.freedesktop.org/gstreamer/meson-ports/libvpx.git
 
 # libx264
-[ ! -d libx264 ] && git clone https://code.videolan.org/videolan/x264.git libx264 && cd libx264 && git reset --hard 023112c6f2f575c72e9f26274d183b70996fb542 && cd ..
+[ ! -d libx264 ] && git clone https://code.videolan.org/videolan/x264.git libx264 && cd libx264 && git reset --hard b35605ace3ddf7c1a5d67a2eb553f034aef41d55 && cd ..
 
 # ffmpeg
 [ ! -d ffmpeg ] && git clone --depth 1 --branch release/$v_ffmpeg https://github.com/FFmpeg/FFmpeg.git ffmpeg && cd ffmpeg && git fetch --depth 1 origin $v_ffmpeg_commit && git reset --hard $v_ffmpeg_commit && cd ..
@@ -56,10 +56,10 @@ HEREDOC
 [ ! -d libplacebo ] && git clone --depth 1 --branch v$v_libplacebo --recurse-submodules https://code.videolan.org/videolan/libplacebo.git libplacebo
 
 # mpv
-[ ! -d mpv ] && git clone https://github.com/mpv-player/mpv.git mpv && cd mpv && git reset --hard 32a164cc017acab50389f2194f720ccfd0b01a28 && cd ..
+[ ! -d mpv ] && git clone https://github.com/mpv-player/mpv.git mpv && cd mpv && git reset --hard $v_mpv && cd ..
 
 # fftools_ffi
-[ ! -d fftools_ffi ] && git clone --branch main https://github.com/moffatman/fftools-ffi.git fftools_ffi && cd fftools_ffi && git reset --hard 10070acb2c090edda86dba431f6c281145ceb221 && cd ..
+[ ! -d fftools_ffi ] && git clone --branch main https://github.com/moffatman/fftools-ffi.git fftools_ffi && cd fftools_ffi && git reset --hard 9b0d4da026d9c830702ec043c1f1f98d407025af && cd ..
 
 # media-kit-android-helper
 [ ! -d media-kit-android-helper ] && git clone --branch main https://github.com/Predidit/media-kit-android-helper.git && cd media-kit-android-helper && git reset --hard b768ce102cfa9b5ddec618bb939d689d1b0899fa && cd ..

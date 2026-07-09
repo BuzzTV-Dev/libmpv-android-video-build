@@ -52,7 +52,6 @@ cpuflags=
 	--disable-devices \
 	--disable-doc \
 	--disable-avdevice \
-	--disable-postproc \
 	--disable-programs \
 	--disable-gray \
 	--disable-swscale-alpha \
