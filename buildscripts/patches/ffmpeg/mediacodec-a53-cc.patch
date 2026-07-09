@@ -1,5 +1,5 @@
 diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
-index cc55b30..4d23ec9 100644
+index cc55b30..63f40bc 100644
 --- a/libavcodec/mediacodecdec.c
 +++ b/libavcodec/mediacodecdec.c
 @@ -34,16 +34,29 @@
@@ -32,7 +32,7 @@ index cc55b30..4d23ec9 100644
  
  typedef struct MediaCodecH264DecContext {
  
-@@ -57,8 +70,147 @@ typedef struct MediaCodecH264DecContext {
+@@ -57,8 +70,168 @@ typedef struct MediaCodecH264DecContext {
      int amlogic_mpeg2_api23_workaround;
  
      int use_ndk_codec;
@@ -123,6 +123,9 @@ index cc55b30..4d23ec9 100644
 +        MediaCodecA53Entry *entry;
 +
 +        if (s->a53_queue_len >= MEDIACODEC_A53_QUEUE_SIZE) {
++            av_log(avctx, AV_LOG_DEBUG,
++                   "a53: queue full, dropping cc for pts %"PRId64"\n",
++                   s->a53_queue[0].pts);
 +            av_buffer_unref(&s->a53_queue[0].buf);
 +            memmove(&s->a53_queue[0], &s->a53_queue[1],
 +                    (MEDIACODEC_A53_QUEUE_SIZE - 1) * sizeof(s->a53_queue[0]));
@@ -133,6 +136,10 @@ index cc55b30..4d23ec9 100644
 +        entry->pts = pkt->pts;
 +        entry->buf = sei.a53_caption.buf_ref;
 +        sei.a53_caption.buf_ref = NULL;
++
++        av_log(avctx, AV_LOG_DEBUG,
++               "a53: queued %d cc bytes for pts %"PRId64" (queue %d)\n",
++               (int)entry->buf->size, entry->pts, s->a53_queue_len);
 +    }
 +
 +    ff_h2645_sei_reset(&sei);
@@ -162,14 +169,28 @@ index cc55b30..4d23ec9 100644
 +        }
 +    }
 +
-+    if (best < 0 || best_delta > tolerance)
++    if (best < 0 || best_delta > tolerance) {
++        av_log(avctx, AV_LOG_DEBUG,
++               "a53: no cc match for frame pts %"PRId64" (best delta %"PRId64", queue %d)\n",
++               frame->pts, best < 0 ? -1 : best_delta, s->a53_queue_len);
 +        return;
++    }
 +
 +    entry = &s->a53_queue[best];
-+    if (av_frame_new_side_data_from_buf(frame, AV_FRAME_DATA_A53_CC, entry->buf))
++    if (av_frame_new_side_data_from_buf(frame, AV_FRAME_DATA_A53_CC, entry->buf)) {
++        const AVFrameSideData *sd =
++            av_frame_get_side_data(frame, AV_FRAME_DATA_A53_CC);
++        char hex[3 * 24 + 1] = {0};
++        int n = FFMIN((int)sd->size, 24);
++        for (i = 0; i < n; i++)
++            snprintf(hex + i * 3, 4, "%02x ", sd->data[i]);
++        av_log(avctx, AV_LOG_DEBUG,
++               "a53: attached %d cc bytes to frame pts %"PRId64" (delta %"PRId64"): %s\n",
++               (int)sd->size, frame->pts, best_delta, hex);
 +        avctx->properties |= FF_CODEC_PROPERTY_CLOSED_CAPTIONS;
-+    else
++    } else {
 +        av_buffer_unref(&entry->buf);
++    }
 +
 +    memmove(&s->a53_queue[best], &s->a53_queue[best + 1],
 +            (s->a53_queue_len - best - 1) * sizeof(s->a53_queue[0]));
@@ -180,7 +201,7 @@ index cc55b30..4d23ec9 100644
  static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
  {
      MediaCodecH264DecContext *s = avctx->priv_data;
-@@ -68,6 +220,11 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
+@@ -68,6 +241,11 @@ static av_cold int mediacodec_decode_close(AVCodecContext *avctx)
  
      av_packet_unref(&s->buffered_pkt);
  
@@ -192,7 +213,7 @@ index cc55b30..4d23ec9 100644
      return 0;
  }
  
-@@ -487,7 +644,7 @@ done:
+@@ -487,7 +665,7 @@ done:
      return ret;
  }
  
@@ -201,7 +222,7 @@ index cc55b30..4d23ec9 100644
  {
      MediaCodecH264DecContext *s = avctx->priv_data;
      int ret;
-@@ -554,6 +711,14 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+@@ -554,6 +732,14 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
  
          /* fetch new packet or eof */
          ret = ff_decode_get_packet(avctx, &s->buffered_pkt);
@@ -216,7 +237,7 @@ index cc55b30..4d23ec9 100644
          if (ret == AVERROR_EOF) {
              AVPacket null_pkt = { 0 };
              ret = ff_mediacodec_dec_send(avctx, s->ctx, &null_pkt, true);
-@@ -570,12 +735,28 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+@@ -570,12 +756,28 @@ static int mediacodec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
      return AVERROR(EAGAIN);
  }
  
