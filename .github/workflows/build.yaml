@@ -32,7 +32,7 @@ jobs:
         run: |
           echo "deb http://deb.debian.org/debian bookworm-backports main" | tee /etc/apt/sources.list.d/bookworm-backports.list
           apt update
-          apt install -y sudo git gcc-multilib libc-dev make automake pkg-config libtool nasm python3-jsonschema wget python3-jinja2 zip python3-pip
+          apt install -y sudo git gcc-multilib libc-dev make automake autoconf autopoint pkg-config libtool nasm python3-jsonschema wget python3-jinja2 zip python3-pip
           apt install -y -t bookworm-backports meson
       - name: Set up JDK 17
         uses: actions/setup-java@v4

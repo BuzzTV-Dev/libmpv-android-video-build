@@ -75,6 +75,8 @@ sed -i -e 's/#define FFMPEG_CONFIGURATION.*/#define FFMPEG_CONFIGURATION ""/' ..
 	\
 	--enable-libxml2 \
 	\
+	--enable-libzvbi \
+	\
 	--enable-avutil \
 	--enable-avcodec \
 	--enable-avfilter \
@@ -133,6 +135,7 @@ sed -i -e 's/#define FFMPEG_CONFIGURATION.*/#define FFMPEG_CONFIGURATION ""/' ..
 	--enable-decoder=ass \
 	--enable-decoder=ccaption \
 	--enable-decoder=dvbsub \
+	--enable-decoder=libzvbi_teletext \
 	--enable-decoder=dvdsub \
 	--enable-decoder=srt \
 	--enable-decoder=stl \

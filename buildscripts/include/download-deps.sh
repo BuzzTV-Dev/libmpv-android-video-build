@@ -21,6 +21,9 @@ mkdir -p deps && cd deps
 # libvorbis
 [ ! -d libvorbis ] && $WGET https://github.com/xiph/vorbis/releases/download/v${v_libvorbis}/libvorbis-${v_libvorbis}.tar.gz && tar -xf libvorbis-${v_libvorbis}.tar.gz && mv libvorbis-${v_libvorbis} libvorbis && rm libvorbis-${v_libvorbis}.tar.gz
 
+# libzvbi
+[ ! -d libzvbi ] && git clone --depth 1 --branch v$v_libzvbi https://github.com/zapping-vbi/zvbi.git libzvbi
+
 # libvpx
 [ ! -d libvpx ] && git clone --depth 1 --branch v$v_libvpx https://gitlab.freedesktop.org/gstreamer/meson-ports/libvpx.git
 

@@ -1,0 +1,20 @@
+Default the libzvbi teletext decoder to ASS output instead of bitmap.
+
+mpv probes the decoder's txt_format default in sd_lavc: when it is bitmap,
+teletext is decoded to paletted bitmaps rendered through the OSD, which
+vo=mediacodec_embed cannot display (it has no OSD path). With the default
+set to ass, mpv rejects teletext in sd_lavc and routes it through
+lavc_conv/sd_ass instead, so the decoded text is available through the
+sub-text/sub-text-ass properties for the app to render.
+
+--- a/libavcodec/libzvbi-teletextdec.c
++++ b/libavcodec/libzvbi-teletextdec.c
+@@ -791,7 +791,7 @@ static const AVOption options[] = {
+     {"txt_page",        "page numbers to decode, subtitle for subtitles, * for all", OFFSET(pgno),   AV_OPT_TYPE_STRING, {.str = "*"},      0, 0,        SD},
+     {"txt_default_region", "default G0 character set used for decoding",     OFFSET(default_region), AV_OPT_TYPE_INT,    {.i64 = -1},      -1, 87,       SD},
+     {"txt_chop_top",    "discards the top teletext line",                    OFFSET(chop_top),       AV_OPT_TYPE_INT,    {.i64 = 1},        0, 1,        SD},
+-    {"txt_format",      "format of the subtitles (bitmap or text or ass)",   OFFSET(format_id),      AV_OPT_TYPE_INT,    {.i64 = 0},        0, 2,        SD,  .unit = "txt_format"},
++    {"txt_format",      "format of the subtitles (bitmap or text or ass)",   OFFSET(format_id),      AV_OPT_TYPE_INT,    {.i64 = 2},        0, 2,        SD,  .unit = "txt_format"},
+     {"bitmap",          NULL,                                                0,                      AV_OPT_TYPE_CONST,  {.i64 = 0},        0, 0,        SD,  .unit = "txt_format"},
+     {"text",            NULL,                                                0,                      AV_OPT_TYPE_CONST,  {.i64 = 1},        0, 0,        SD,  .unit = "txt_format"},
+     {"ass",             NULL,                                                0,                      AV_OPT_TYPE_CONST,  {.i64 = 2},        0, 0,        SD,  .unit = "txt_format"},

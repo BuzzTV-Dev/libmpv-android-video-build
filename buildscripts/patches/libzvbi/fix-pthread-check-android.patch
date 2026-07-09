@@ -1,0 +1,28 @@
+Fix the pthread configure check for Android/bionic.
+
+Bionic has no separate libpthread (pthread_create lives in libc), so the
+-lpthread and -lpthreadGC2 probes fail and configure falls back to a plain
+link test. That test calls pthread_create() without declaring it, which
+NDK clang (C11, implicit-function-declaration = error) rejects, so the
+whole check dies even though pthreads work fine. Include <pthread.h> and
+call the function with a valid signature instead.
+
+diff --git a/configure.ac b/configure.ac
+index 0288c88..50e731b 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -239,10 +239,12 @@ dnl with AC_LINK_IFELSE.
+ dnl
+ AC_CHECK_LIB(pthread, pthread_create,,[
+   AC_CHECK_LIB(pthreadGC2, pthread_create,,[
+-    AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[pthread_create();]])],[],[
++    AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <pthread.h>]],
++        [[pthread_create((pthread_t *) 0, (const pthread_attr_t *) 0, (void *(*)(void *)) 0, (void *) 0);]])],[],[
+       # same as previous, but use '-pthread' instead of '-lpthread'
+       LDFLAGS="$LDFLAGS -pthread"
+-      AC_LINK_IFELSE([AC_LANG_PROGRAM([[]], [[pthread_create();]])],[],[
++      AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <pthread.h>]],
++          [[pthread_create((pthread_t *) 0, (const pthread_attr_t *) 0, (void *(*)(void *)) 0, (void *) 0);]])],[],[
+ 	AC_MSG_ERROR([Unable to link pthread functions])
+       ])
+     ])

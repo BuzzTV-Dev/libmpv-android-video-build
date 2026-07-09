@@ -1,0 +1,31 @@
+Do not undef __i386__/__i686__ in misc.h.
+
+Leftover from a deprecated GCC #cpu assertion workaround: misc.h
+unconditionally undefines __i386__, which breaks bionic headers included
+after it (sys/user.h hits #error "Unsupported architecture.") when
+building for Android x86.
+
+diff --git a/src/misc.h b/src/misc.h
+index dbe91b8..b0a0600 100644
+--- a/src/misc.h
++++ b/src/misc.h
+@@ -52,9 +52,9 @@
+ #  define unlikely(expr) __builtin_expect(expr, 0)
+ #endif
+ 
++/* FIXME #cpu is deprecated
+ #undef __i386__
+ #undef __i686__
+-/* FIXME #cpu is deprecated
+ #if #cpu (i386)
+ #  define __i386__ 1
+ #endif
+@@ -156,8 +156,6 @@ do {									\
+ 
+ #define likely(expr) (expr)
+ #define unlikely(expr) (expr)
+-#undef __i386__
+-#undef __i686__
+ 
+ static char *
+ PARENT_HELPER (char *p, unsigned int offset)
