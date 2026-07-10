@@ -1,10 +1,10 @@
 # --------------------------------------------------
 
 if [ -d deps ]; then
-  sudo rm -r deps
+  rm -r deps
 fi
 if [ -d prefix ]; then
-  sudo rm -r prefix
+  rm -r prefix
 fi
 
 ./download.sh
@@ -23,7 +23,7 @@ cp flavors/full.sh scripts/ffmpeg.sh
 
 cd deps/media-kit-android-helper
 
-sudo chmod +x gradlew
+chmod +x gradlew
 ./gradlew assembleRelease
 
 unzip -o app/build/outputs/apk/release/app-release.apk -d app/build/outputs/apk/release

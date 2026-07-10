@@ -1,0 +1,297 @@
+--- a/include/mpv/client.h
++++ b/include/mpv/client.h
+@@ -1740,6 +1740,88 @@
+ MPV_EXPORT int mpv_lavc_set_java_vm(void *vm);
+ 
+ /**
++ * A single subtitle bitmap ("part"). Pixel data is 32 bit per pixel BGRA
++ * (native little endian: B is the first byte in memory, A the last) with
++ * premultiplied alpha, tightly packed (stride == w * 4).
++ *
++ * Coordinates are relative to a virtual canvas of size
++ * mpv_sub_bitmaps.canvas_w x mpv_sub_bitmaps.canvas_h. To display, stretch
++ * the canvas over the area where the video is shown, and draw the bitmap
++ * scaled from w x h to dw x dh at position (x, y).
++ */
++typedef struct mpv_sub_bitmap {
++    int32_t x;          // top-left corner x in canvas coordinates
++    int32_t y;          // top-left corner y in canvas coordinates
++    int32_t dw;         // intended display width in canvas coordinates
++    int32_t dh;         // intended display height in canvas coordinates
++    int32_t w;          // bitmap width in pixels
++    int32_t h;          // bitmap height in pixels
++    int32_t stride;     // bytes per bitmap row (always w * 4)
++    uint8_t *pixels;    // w * h premultiplied BGRA pixels
++} mpv_sub_bitmap;
++
++/**
++ * A set of subtitle bitmaps as delivered to the callback registered with
++ * mpv_set_sub_bitmaps_callback(). num_parts == 0 means "no subtitle visible;
++ * clear the overlay".
++ *
++ * The whole structure (including all pointed-to data) lives in a single
++ * allocation owned by the receiver of the callback; release it with
++ * mpv_sub_bitmaps_free() (from any thread) when done.
++ */
++typedef struct mpv_sub_bitmaps {
++    uint64_t serial;    // increments with each callback invocation
++    int32_t canvas_w;   // canvas width the coordinates refer to
++    int32_t canvas_h;   // canvas height the coordinates refer to
++    int32_t num_parts;  // number of entries in parts (0 = clear)
++    mpv_sub_bitmap *parts;
++} mpv_sub_bitmaps;
++
++typedef void (*mpv_sub_bitmaps_callback)(void *userdata, mpv_sub_bitmaps *subs);
++
++/**
++ * Register a callback that receives decoded bitmap subtitles (DVB, PGS,
++ * DVD, ...) for the primary subtitle track, timed to the current playback
++ * position. Text subtitle tracks are NOT delivered here - consume them
++ * through the "sub-text" property instead (delivering libass renderings of
++ * them too would show them twice for hosts that already draw "sub-text").
++ *
++ * The callback only fires while the primary subtitle track is selected,
++ * visible (--sub-visibility=yes) and video is playing.
++ *
++ * This is a custom extension for VOs that cannot render OSD themselves (in
++ * particular --vo=mediacodec_embed on Android, where video frames go straight
++ * to a Surface). The host application is expected to draw the bitmaps on its
++ * own overlay layer above the video. Do not use it together with a VO that
++ * renders subtitles itself (e.g. --vo=gpu) - both would consume the subtitle
++ * decoder's change tracking and each would see incomplete updates.
++ *
++ * The callback is invoked from mpv's core thread whenever the visible
++ * subtitle changes: with num_parts > 0 when a new subtitle (or a changed
++ * position/canvas) should be shown, and with num_parts == 0 when the current
++ * subtitle should be hidden. It is NOT invoked per video frame. The callback
++ * must not block and must not call any mpv client API functions; hand the
++ * data to another thread and return. The mpv_sub_bitmaps pointer stays valid
++ * until the receiver calls mpv_sub_bitmaps_free() on it, which may happen at
++ * any later time from any thread.
++ *
++ * The overlay should also be cleared by the application on MPV_EVENT_END_FILE
++ * and when it deselects the subtitle track while playback is not running, as
++ * no callbacks are generated once playback stops.
++ *
++ * Passing cb = NULL disables the callback again.
++ */
++MPV_EXPORT void mpv_set_sub_bitmaps_callback(mpv_handle *ctx,
++                                             mpv_sub_bitmaps_callback cb,
++                                             void *userdata);
++
++/**
++ * Free a mpv_sub_bitmaps handed to the callback registered with
++ * mpv_set_sub_bitmaps_callback(). Safe to call from any thread.
++ */
++MPV_EXPORT void mpv_sub_bitmaps_free(mpv_sub_bitmaps *subs);
++
++/**
+  * Set a custom function that should be called when there are new events. Use
+  * this if blocking in mpv_wait_event() to wait for new events is not feasible.
+  *
+@@ -2023,6 +2105,10 @@
+ #define mpv_wakeup pfn_mpv_wakeup
+ MPV_DEFINE_SYM_PTR(mpv_lavc_set_java_vm)
+ #define mpv_lavc_set_java_vm pfn_mpv_lavc_set_java_vm
++MPV_DEFINE_SYM_PTR(mpv_set_sub_bitmaps_callback)
++#define mpv_set_sub_bitmaps_callback pfn_mpv_set_sub_bitmaps_callback
++MPV_DEFINE_SYM_PTR(mpv_sub_bitmaps_free)
++#define mpv_sub_bitmaps_free pfn_mpv_sub_bitmaps_free
+ MPV_DEFINE_SYM_PTR(mpv_set_wakeup_callback)
+ #define mpv_set_wakeup_callback pfn_mpv_set_wakeup_callback
+ MPV_DEFINE_SYM_PTR(mpv_wait_async_requests)
+--- a/player/client.c
++++ b/player/client.c
+@@ -971,6 +971,22 @@
+     return av_jni_set_java_vm(vm, NULL);
+ }
+ 
++void mpv_set_sub_bitmaps_callback(mpv_handle *ctx, mpv_sub_bitmaps_callback cb,
++                                  void *userdata)
++{
++    struct MPContext *mpctx = ctx->mpctx;
++    mp_dispatch_lock(mpctx->dispatch);
++    mpctx->sub_export_cb = cb;
++    mpctx->sub_export_cb_ud = userdata;
++    mpctx->sub_export_had_sub = false;
++    mp_dispatch_unlock(mpctx->dispatch);
++}
++
++void mpv_sub_bitmaps_free(mpv_sub_bitmaps *subs)
++{
++    free(subs);
++}
++
+ // map client API types to internal types
+ static const struct m_option type_conv[] = {
+     [MPV_FORMAT_STRING]     = { .type = CONF_TYPE_STRING },
+--- a/player/core.h
++++ b/player/core.h
+@@ -35,6 +35,8 @@
+ 
+ // definitions used internally by the core player code
+ 
++struct mpv_sub_bitmaps;
++
+ enum stop_play_reason {
+     KEEP_PLAYING = 0,   // playback of a file is actually going on
+                         // must be 0, numeric values of others do not matter
+@@ -276,6 +278,13 @@
+     bool osd_show_pos;
+     struct osd_progbar_state osd_progbar;
+ 
++    // Custom subtitle bitmap export (see mpv_set_sub_bitmaps_callback()).
++    // Written under mp_dispatch_lock, read from the core thread.
++    void (*sub_export_cb)(void *userdata, struct mpv_sub_bitmaps *subs);
++    void *sub_export_cb_ud;
++    uint64_t sub_export_serial;
++    bool sub_export_had_sub;
++
+     struct playlist *playlist;
+     struct playlist_entry *playing; // currently playing file
+     char *filename; // immutable copy of playing->filename (or NULL)
+--- a/player/sub.c
++++ b/player/sub.c
+@@ -20,7 +20,10 @@
+ #include <inttypes.h>
+ #include <math.h>
+ #include <assert.h>
++#include <stdlib.h>
++#include <string.h>
+ 
++#include "mpv/client.h"
+ #include "mpv_talloc.h"
+ 
+ #include "common/msg.h"
+@@ -160,6 +163,95 @@
+     return packets_read;
+ }
+ 
++// Deliver a copy of *sb (or a "clear" event if sb is NULL) to the registered
++// mpv_set_sub_bitmaps_callback(). See client.h for the data contract.
++static void sub_export_emit(struct MPContext *mpctx, struct sub_bitmaps *sb,
++                            int canvas_w, int canvas_h)
++{
++    int num = sb ? sb->num_parts : 0;
++    size_t size = sizeof(mpv_sub_bitmaps) + num * sizeof(mpv_sub_bitmap);
++    for (int n = 0; n < num; n++)
++        size += (size_t)sb->parts[n].w * sb->parts[n].h * 4;
++
++    mpv_sub_bitmaps *ev = calloc(1, size);
++    if (!ev)
++        return;
++
++    ev->serial = ++mpctx->sub_export_serial;
++    ev->canvas_w = canvas_w;
++    ev->canvas_h = canvas_h;
++    ev->num_parts = num;
++    ev->parts = (mpv_sub_bitmap *)(ev + 1);
++    uint8_t *px = (uint8_t *)(ev->parts + num);
++    for (int n = 0; n < num; n++) {
++        struct sub_bitmap *part = &sb->parts[n];
++        ev->parts[n] = (mpv_sub_bitmap){
++            .x = part->x, .y = part->y,
++            .dw = part->dw, .dh = part->dh,
++            .w = part->w, .h = part->h,
++            .stride = part->w * 4,
++            .pixels = px,
++        };
++        for (int y = 0; y < part->h; y++) {
++            memcpy(px, (uint8_t *)part->bitmap + (size_t)y * part->stride,
++                   (size_t)part->w * 4);
++            px += (size_t)part->w * 4;
++        }
++    }
++
++    mpctx->sub_export_had_sub = num > 0;
++    mpctx->sub_export_cb(mpctx->sub_export_cb_ud, ev);
++}
++
++// Feed the current primary subtitle bitmaps to the host application. This is
++// meant for VOs that cannot render OSD (--vo=mediacodec_embed), where nothing
++// else ever calls sub_get_bitmaps().
++static void sub_export_update(struct MPContext *mpctx, double video_pts)
++{
++    if (!mpctx->sub_export_cb)
++        return;
++
++    // update_subtitles() is reached with slightly different timestamps
++    // depending on the caller (upcoming frame pts vs. playback pts). Around
++    // subtitle boundaries those disagree & the exported state would flip
++    // back & forth for a few frames. Anchor on the currently displayed
++    // frame instead so every call within one frame sees the same state.
++    if (mpctx->video_pts != MP_NOPTS_VALUE)
++        video_pts = mpctx->video_pts;
++
++    struct track *track = mpctx->current_track[0][STREAM_SUB];
++    struct dec_sub *dec_sub = track ? track->d_sub : NULL;
++    struct sub_bitmaps *sb = NULL;
++    int cw = 0, ch = 0;
++
++    // Only bitmap subtitles (sd_lavc: DVB/PGS/DVD/...) are exported. Text
++    // subtitles are expected to be consumed through the "sub-text" property;
++    // exporting their libass rendering here would display them twice.
++    if (dec_sub && track->selected && sub_is_bitmap_sub(dec_sub) &&
++        sub_is_primary_visible(dec_sub) &&
++        video_pts != MP_NOPTS_VALUE && mpctx->vo_chain)
++    {
++        struct mp_image_params params = mpctx->vo_chain->filter->input_params;
++        if (params.imgfmt) {
++            mp_image_params_get_dsize(&params, &cw, &ch);
++            if (cw > 0 && ch > 0) {
++                struct mp_osd_res res = {.w = cw, .h = ch, .display_par = 1};
++                sb = sub_get_bitmaps(dec_sub, res, SUBBITMAP_BGRA, video_pts);
++                if (sb && sb->format != SUBBITMAP_BGRA)
++                    TA_FREEP(&sb);
++            }
++        }
++    }
++
++    if (!sb || !sb->num_parts) {
++        if (mpctx->sub_export_had_sub)
++            sub_export_emit(mpctx, NULL, cw, ch);
++    } else if (!mpctx->sub_export_had_sub || sb->change_id) {
++        sub_export_emit(mpctx, sb, cw, ch);
++    }
++    talloc_free(sb);
++}
++
+ // Return true if the subtitles for the given PTS are ready; false if the player
+ // should wait for new demuxer data, and then should retry.
+ bool update_subtitles(struct MPContext *mpctx, double video_pts)
+@@ -167,6 +259,7 @@
+     bool ok = true;
+     for (int n = 0; n < num_ptracks[STREAM_SUB]; n++)
+         ok &= update_subtitle(mpctx, video_pts, mpctx->current_track[n][STREAM_SUB]);
++    sub_export_update(mpctx, video_pts);
+     return ok;
+ }
+ 
+--- a/sub/dec_sub.c
++++ b/sub/dec_sub.c
+@@ -564,6 +564,15 @@
+     return ret;
+ }
+ 
++// Whether the subtitle decoder produces bitmap subtitles (DVB/PGS/DVD/...).
++bool sub_is_bitmap_sub(struct dec_sub *sub)
++{
++    mp_mutex_lock(&sub->lock);
++    bool ret = sub->sd && sub->sd->driver == &sd_lavc;
++    mp_mutex_unlock(&sub->lock);
++    return ret;
++}
++
+ bool sub_is_secondary_visible(struct dec_sub *sub)
+ {
+     mp_mutex_lock(&sub->lock);
+--- a/sub/dec_sub.h
++++ b/sub/dec_sub.h
+@@ -57,6 +57,7 @@
+ void sub_set_recorder_sink(struct dec_sub *sub, struct mp_recorder_sink *sink);
+ void sub_set_play_dir(struct dec_sub *sub, int dir);
+ bool sub_is_primary_visible(struct dec_sub *sub);
++bool sub_is_bitmap_sub(struct dec_sub *sub);
+ bool sub_is_secondary_visible(struct dec_sub *sub);
+ 
+ int sub_control(struct dec_sub *sub, enum sd_ctrl cmd, void *arg);
