@@ -1,0 +1,106 @@
+Bail out of the MediaCodec EAGAIN retry loop when the codec is wedged.
+
+mediacodec_receive_frame_internal() retries forever when the input queue
+is full and no output frame arrives: dequeueInputBuffer(0) has no space,
+the blocking output dequeue returns EAGAIN, and the loop continues. Right
+after a flush output_buffer_count is 0, so the "blocking" receive polls
+with a zero timeout and the loop busy-spins. If the codec stops making
+progress entirely, avcodec_receive_frame() never returns and the calling
+thread hangs forever.
+
+c2.amlogic.mpeg2.decoder does exactly that: flushed twice within ~100 ms
+of startup (the track-switch + hr-seek dance on live TS streams), it
+wedges with all 8 input buffers queued and all surface-side output
+buffers held, freezing mpv's core thread and with it the whole player.
+Upstream only carries a workaround for the OMX-era
+"OMX.amlogic.mpeg2.decoder.awesome" on API <= 23.
+
+Bound the no-progress window: after 2 seconds with a full input queue and
+no output, log an error and return AVERROR_EXTERNAL. The wedge is sticky:
+a wedged instance never recovers, so subsequent calls fail immediately
+instead of waiting out the timeout again, letting the caller reach its
+failure threshold (mpv: --hwdec-software-fallback, default 3) within
+milliseconds and recreate the decoder. Also sleep 2 ms per retry so the
+post-flush case does not busy-spin.
+
+Pairs with mpv's mpv_mediacodec_hwdec_retry.patch, which recreates the
+mediacodec decoder instead of falling back to software decoding (which
+vo=mediacodec_embed cannot display).
+
+Applies on top of mediacodec-a53-cc.patch (both patch trees).
+
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -32,6 +32,7 @@
+ #include "libavutil/intreadwrite.h"
+ #include "libavutil/pixfmt.h"
+ #include "libavutil/internal.h"
++#include "libavutil/time.h"
+ 
+ #include "avcodec.h"
+ #include "bytestream.h"
+@@ -72,6 +73,9 @@
+     int use_ndk_codec;
+     // Ref. MediaFormat KEY_OPERATING_RATE
+     int operating_rate;
++    /* Set when the codec made no progress for MEDIACODEC_WEDGE_TIMEOUT_US;
++     * the instance is unusable until recreated, so fail fast afterwards. */
++    int wedged;
+ 
+     /* A/53 closed captions extracted from H.264/HEVC SEI, in decode order,
+      * waiting to be attached to the matching output frame. */
+@@ -679,11 +683,25 @@
+     return ret;
+ }
+ 
++/* If the codec stops making progress entirely (input queue full and no
++ * output frame for this long), give up so the caller can recover by
++ * recreating the decoder. Some codecs (c2.amlogic.mpeg2.decoder) wedge
++ * like this when flushed shortly after startup; without a bound the
++ * EAGAIN retry loop below never returns and the calling thread hangs. */
++#define MEDIACODEC_WEDGE_TIMEOUT_US 2000000
++
+ static int mediacodec_receive_frame_internal(AVCodecContext *avctx, AVFrame *frame)
+ {
+     MediaCodecH264DecContext *s = avctx->priv_data;
+     int ret;
+     ssize_t index;
++    int64_t wedge_start = 0;
++
++    /* A wedged codec never recovers; don't wait the full timeout again on
++     * every call. Failing fast lets the caller reach its error threshold
++     * and recreate the decoder promptly. */
++    if (s->wedged)
++        return AVERROR_EXTERNAL;
+ 
+     /* In delay_flush mode, wait until the user has released or rendered
+        all retained frames. */
+@@ -712,10 +730,27 @@
+                  * return EAGAIN, which violate the design.
+                  */
+                 if (ff_AMediaCodec_infoTryAgainLater(s->ctx->codec, index) &&
+-                    ret == AVERROR(EAGAIN))
++                    ret == AVERROR(EAGAIN)) {
++                    int64_t now = av_gettime_relative();
++                    if (!wedge_start) {
++                        wedge_start = now;
++                    } else if (now - wedge_start >= MEDIACODEC_WEDGE_TIMEOUT_US) {
++                        av_log(avctx, AV_LOG_ERROR,
++                               "MediaCodec %s made no progress for %d ms with a "
++                               "full input queue, assuming it is wedged\n",
++                               s->ctx->codec_name,
++                               (int)(MEDIACODEC_WEDGE_TIMEOUT_US / 1000));
++                        s->wedged = 1;
++                        return AVERROR_EXTERNAL;
++                    }
++                    /* avoid busy-polling: right after a flush the blocking
++                     * receive above polls with a zero timeout */
++                    av_usleep(2000);
+                     continue;
++                }
+                 return ret;
+             }
++            wedge_start = 0;
+             s->ctx->current_input_buffer = index;
+         }
+ 
