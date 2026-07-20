@@ -1,4 +1,5 @@
-Bail out of the MediaCodec EAGAIN retry loop when the codec is wedged.
+Bail out of the MediaCodec EAGAIN retry loop when the codec is wedged,
+and never block on a wedged codec's teardown.
 
 mediacodec_receive_frame_internal() retries forever when the input queue
 is full and no output frame arrives: dequeueInputBuffer(0) has no space,
@@ -12,16 +13,33 @@ c2.amlogic.mpeg2.decoder does exactly that: flushed twice within ~100 ms
 of startup (the track-switch + hr-seek dance on live TS streams), it
 wedges with all 8 input buffers queued and all surface-side output
 buffers held, freezing mpv's core thread and with it the whole player.
-Upstream only carries a workaround for the OMX-era
-"OMX.amlogic.mpeg2.decoder.awesome" on API <= 23.
+c2.rk.avc.decoder (rk3588) wedges the same way, and additionally gets
+permanently stuck in its output buffer dequeue loop (C2BqBuffer logs
+"N consecutive failures" forever), so ALL subsequent calls into the
+codec - flush, stop, delete - also block forever. Upstream only carries
+a workaround for the OMX-era "OMX.amlogic.mpeg2.decoder.awesome" on
+API <= 23.
 
-Bound the no-progress window: after 2 seconds with a full input queue and
-no output, log an error and return AVERROR_EXTERNAL. The wedge is sticky:
-a wedged instance never recovers, so subsequent calls fail immediately
-instead of waiting out the timeout again, letting the caller reach its
-failure threshold (mpv: --hwdec-software-fallback, default 3) within
-milliseconds and recreate the decoder. Also sleep 2 ms per retry so the
-post-flush case does not busy-spin.
+Detection: bound the no-progress window. After 2 seconds with a full
+input queue and no output, log an error and return AVERROR_EXTERNAL.
+The wedge flag lives in the shared MediaCodecDecContext so the common
+layer sees it too. The wedge is sticky: subsequent receive AND send
+calls fail immediately instead of waiting out timeouts, letting the
+caller reach its failure threshold (mpv: --hwdec-software-fallback,
+default 3) within milliseconds and recreate the decoder. Also sleep
+2 ms per retry so the post-flush case does not busy-spin.
+
+Teardown: once wedged, avcodec_flush_buffers() skips the codec flush
+(observed blocking forever on rk3588, hanging mpv's core thread inside
+uninit_avctx before the recreate could even be attempted - the player
+went silent with audio-over-black until app restart), and close hands
+stop + the final unref to a detached thread. The abandon thread waits
+(bounded, 10 s) for outstanding frame references to drain so the
+possibly-blocking delete also lands on it rather than on a playback
+thread; pending output buffers are invalidated via the serial bump so
+frame releases do not call back into the dying codec. Worst case the
+HAL never returns and the codec instance leaks - which it did anyway,
+minus the frozen player.
 
 Pairs with mpv's mpv_mediacodec_hwdec_retry.patch, which recreates the
 mediacodec decoder instead of falling back to software decoding (which
@@ -29,6 +47,8 @@ vo=mediacodec_embed cannot display).
 
 Applies on top of mediacodec-a53-cc.patch (both patch trees).
 
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+index 7ca7ecb..e6b1d6b 100644
 --- a/libavcodec/mediacodecdec.c
 +++ b/libavcodec/mediacodecdec.c
 @@ -32,6 +32,7 @@
@@ -39,17 +59,7 @@ Applies on top of mediacodec-a53-cc.patch (both patch trees).
  
  #include "avcodec.h"
  #include "bytestream.h"
-@@ -72,6 +73,9 @@
-     int use_ndk_codec;
-     // Ref. MediaFormat KEY_OPERATING_RATE
-     int operating_rate;
-+    /* Set when the codec made no progress for MEDIACODEC_WEDGE_TIMEOUT_US;
-+     * the instance is unusable until recreated, so fail fast afterwards. */
-+    int wedged;
- 
-     /* A/53 closed captions extracted from H.264/HEVC SEI, in decode order,
-      * waiting to be attached to the matching output frame. */
-@@ -679,11 +683,25 @@
+@@ -679,11 +680,25 @@ done:
      return ret;
  }
  
@@ -70,12 +80,12 @@ Applies on top of mediacodec-a53-cc.patch (both patch trees).
 +    /* A wedged codec never recovers; don't wait the full timeout again on
 +     * every call. Failing fast lets the caller reach its error threshold
 +     * and recreate the decoder promptly. */
-+    if (s->wedged)
++    if (s->ctx->wedged)
 +        return AVERROR_EXTERNAL;
  
      /* In delay_flush mode, wait until the user has released or rendered
         all retained frames. */
-@@ -712,10 +730,27 @@
+@@ -712,10 +727,27 @@ static int mediacodec_receive_frame_internal(AVCodecContext *avctx, AVFrame *fra
                   * return EAGAIN, which violate the design.
                   */
                  if (ff_AMediaCodec_infoTryAgainLater(s->ctx->codec, index) &&
@@ -90,7 +100,7 @@ Applies on top of mediacodec-a53-cc.patch (both patch trees).
 +                               "full input queue, assuming it is wedged\n",
 +                               s->ctx->codec_name,
 +                               (int)(MEDIACODEC_WEDGE_TIMEOUT_US / 1000));
-+                        s->wedged = 1;
++                        s->ctx->wedged = 1;
 +                        return AVERROR_EXTERNAL;
 +                    }
 +                    /* avoid busy-polling: right after a flush the blocking
@@ -104,3 +114,116 @@ Applies on top of mediacodec-a53-cc.patch (both patch trees).
              s->ctx->current_input_buffer = index;
          }
  
+diff --git a/libavcodec/mediacodecdec_common.c b/libavcodec/mediacodecdec_common.c
+index 9b91c8e..e8e17dc 100644
+--- a/libavcodec/mediacodecdec_common.c
++++ b/libavcodec/mediacodecdec_common.c
+@@ -20,6 +20,7 @@
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+  */
+ 
++#include <pthread.h>
+ #include <string.h>
+ #include <sys/types.h>
+ 
+@@ -901,6 +902,11 @@ int ff_mediacodec_dec_send(AVCodecContext *avctx, MediaCodecDecContext *s,
+     int64_t input_dequeue_timeout_us = wait ? INPUT_DEQUEUE_TIMEOUT_US : 0;
+     int64_t pts;
+ 
++    /* A wedged codec never consumes input; fail fast instead of waiting out
++     * the input dequeue timeout on every call. */
++    if (s->wedged)
++        return AVERROR_EXTERNAL;
++
+     if (s->flushing) {
+         av_log(avctx, AV_LOG_ERROR, "Decoder is flushing and cannot accept new buffer "
+                                     "until all output buffers have been released\n");
+@@ -1110,6 +1116,13 @@ int ff_mediacodec_dec_receive(AVCodecContext *avctx, MediaCodecDecContext *s,
+ */
+ int ff_mediacodec_dec_flush(AVCodecContext *avctx, MediaCodecDecContext *s)
+ {
++    /* Flushing a wedged codec can block forever inside the HAL (observed
++     * with c2.rk.avc.decoder stuck in its output buffer dequeue loop). The
++     * instance is unusable and about to be torn down anyway, so skip the
++     * codec call and report the flush as performed. */
++    if (s->wedged)
++        return 1;
++
+     if (!s->surface || !s->delay_flush || atomic_load(&s->refcount) == 1) {
+         int ret;
+ 
+@@ -1126,11 +1139,56 @@ int ff_mediacodec_dec_flush(AVCodecContext *avctx, MediaCodecDecContext *s)
+     return 0;
+ }
+ 
++/* Teardown of a wedged codec, running on a detached thread: the HAL may
++ * never return from stop/delete (c2.rk.avc.decoder), and blocking here is
++ * harmless while blocking the decoding thread would freeze the player.
++ * Waits (bounded) for outstanding frame references to drain first, so the
++ * final unref - and with it the possibly-blocking delete - happens on this
++ * thread rather than on whichever playback thread drops the last frame. */
++static void *mediacodec_dec_abandon_thread(void *arg)
++{
++    MediaCodecDecContext *s = arg;
++    int i;
++
++    ff_AMediaCodec_stop(s->codec);
++
++    for (i = 0; i < 1000 && atomic_load(&s->refcount) > 1; i++)
++        av_usleep(10000);
++
++    ff_mediacodec_dec_unref(s);
++
++    return NULL;
++}
++
+ int ff_mediacodec_dec_close(AVCodecContext *avctx, MediaCodecDecContext *s)
+ {
+     if (!s)
+         return 0;
+ 
++    if (s->codec && s->wedged) {
++        pthread_t thread;
++        pthread_attr_t attr;
++        int ret = pthread_attr_init(&attr);
++
++        /* Invalidate output buffers still referenced by frames so their
++         * release does not call back into the dying codec. */
++        atomic_fetch_add(&s->serial, 1);
++
++        if (!ret) {
++            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++            av_log(avctx, AV_LOG_WARNING,
++                   "Abandoning wedged MediaCodec %s on a detached thread\n",
++                   s->codec_name);
++            ret = pthread_create(&thread, &attr, mediacodec_dec_abandon_thread, s);
++            pthread_attr_destroy(&attr);
++            if (!ret)
++                return 0;
++        }
++        av_log(avctx, AV_LOG_WARNING,
++               "Failed to spawn abandon thread, stopping the wedged codec "
++               "synchronously (this can block)\n");
++    }
++
+     if (s->codec) {
+         if (atomic_load(&s->hw_buffer_count) == 0) {
+             ff_AMediaCodec_stop(s->codec);
+diff --git a/libavcodec/mediacodecdec_common.h b/libavcodec/mediacodecdec_common.h
+index 0ab2903..5ac7c29 100644
+--- a/libavcodec/mediacodecdec_common.h
++++ b/libavcodec/mediacodecdec_common.h
+@@ -71,6 +71,13 @@ typedef struct MediaCodecDecContext {
+     atomic_int serial;
+ 
+     bool use_ndk_codec;
++
++    /* Set when the codec stopped making progress entirely (see the wedge
++     * watchdog in mediacodecdec.c). A wedged instance never recovers, and on
++     * some Codec2 HALs (c2.rk.avc.decoder) its flush/stop/delete calls block
++     * forever, so all further interaction with it fails fast and the final
++     * teardown is handed to a detached thread (see ff_mediacodec_dec_close). */
++    int wedged;
+ } MediaCodecDecContext;
+ 
+ int ff_mediacodec_dec_init(AVCodecContext *avctx,
