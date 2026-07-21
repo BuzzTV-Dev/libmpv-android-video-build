@@ -1,0 +1,45 @@
+Raise the AImageReader image count for high-reorder MediaCodec streams
+
+mpv's Android GL interop (hwdec=mediacodec with vo=gpu/gpu-next) creates
+its AImageReader with maxImages=5. That value bounds how many decoded
+frames may be in flight to GL, and therefore how many output buffers the
+MediaCodec decoder can hold in the reader's BufferQueue.
+
+Five is too few for streams with a large reorder/DPB depth. On Rockchip
+(c2.rk.avc.decoder, rk3588) an ordinary 1080p H.264 stream is reported
+with output.delay up to ~21; the decoder can only fetch a fraction of the
+output buffers it needs, produces the first frame, then stalls -
+"acquireLatestImage failed: -30001" (AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE),
+frozen video over continuing audio.
+
+Raise maxImages to 34: it covers the H.264/HEVC maximum DPB (16) plus
+reorder and display slack while staying under the BufferQueue's 64-slot
+ceiling. Images are allocated lazily as the producer queues them, so
+low-DPB streams allocate only what they use and pay nothing extra.
+
+diff --git a/video/out/hwdec/hwdec_aimagereader.c b/video/out/hwdec/hwdec_aimagereader.c
+index 83c2ea87ef..e56e21b49f 100644
+--- a/video/out/hwdec/hwdec_aimagereader.c
++++ b/video/out/hwdec/hwdec_aimagereader.c
+@@ -154,9 +154,20 @@ static int init(struct ra_hwdec *hw)
+         hw->glsl_extensions = es2_exts;
+ 
+     // dummy dimensions, AImageReader only transports hardware buffers
++    //
++    // maxImages caps how many decoded frames may be in flight to GL, which in
++    // turn bounds how many output buffers the MediaCodec decoder can hold in
++    // its BufferQueue. The upstream value of 5 starves decoders whose stream
++    // carries a large reorder/DPB depth: on Rockchip (c2.rk.avc.decoder) an
++    // ordinary 1080p H.264 stream reports output.delay up to ~21 and can only
++    // fetch a fraction of the buffers it needs, so it stalls after the first
++    // frame ("acquireLatestImage failed: -30001", frozen video with audio).
++    // 34 covers the H.264/HEVC maximum DPB (16) plus reorder and display
++    // slack while staying under the BufferQueue's 64-slot ceiling; images are
++    // allocated lazily, so low-DPB streams pay nothing.
+     media_status_t ret = p->AImageReader_newWithUsage(16, 16,
+         AIMAGE_FORMAT_PRIVATE, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE,
+-        5, &p->reader);
++        34, &p->reader);
+     if (ret != AMEDIA_OK) {
+         MP_ERR(hw, "newWithUsage failed: %d\n", ret);
+         return -1;
