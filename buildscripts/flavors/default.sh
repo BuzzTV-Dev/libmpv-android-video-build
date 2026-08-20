@@ -228,6 +228,8 @@ sed -i -e 's/#define FFMPEG_CONFIGURATION.*/#define FFMPEG_CONFIGURATION ""/' ..
 	--enable-filter=dynaudnorm \
 	--enable-filter=loudnorm \
 	--enable-filter=acompressor \
+	--enable-filter=bwdif \
+	--enable-filter=yadif \
 	\
 	--enable-protocol=async \
 	--enable-protocol=cache \
