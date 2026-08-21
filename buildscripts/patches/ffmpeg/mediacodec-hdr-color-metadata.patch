@@ -1,0 +1,99 @@
+diff --git a/libavcodec/mediacodecdec.c b/libavcodec/mediacodecdec.c
+--- a/libavcodec/mediacodecdec.c
++++ b/libavcodec/mediacodecdec.c
+@@ -27,6 +27,7 @@
+ 
+ #include "libavutil/avassert.h"
+ #include "libavutil/common.h"
++#include "libavutil/mastering_display_metadata.h"
+ #include "libavutil/mem.h"
+ #include "libavutil/opt.h"
+ #include "libavutil/intreadwrite.h"
+@@ -498,6 +499,78 @@ static int common_set_extradata(AVCodecContext *avctx, FFAMediaFormat *format)
+ }
+ #endif
+ 
++static uint16_t hdr_info_u16(AVRational v, int64_t scale)
++{
++    return av_clip64(av_rescale(v.num, scale, v.den), 0, UINT16_MAX);
++}
++
++/*
++ * Forward container-level color metadata to MediaCodec so the decoder can
++ * tag its output buffers with the correct dataspace. Codecs that signal
++ * this in-band (H.264/HEVC VUI + SEI) don't need it, but VP9 profile 2
++ * carries no in-band color metadata at all: without these keys the decoder
++ * assumes an SDR dataspace and HDR passthrough never engages when decoding
++ * directly to a Surface.
++ */
++static void mediacodec_set_color_info(AVCodecContext *avctx, FFAMediaFormat *format)
++{
++    const AVPacketSideData *sd;
++    int value;
++
++    value = ff_AMediaFormatColorRange_from_AVColorRange(avctx->color_range);
++    if (value != COLOR_RANGE_UNSPECIFIED)
++        ff_AMediaFormat_setInt32(format, "color-range", value);
++
++    value = ff_AMediaFormatColorStandard_from_AVColorSpace(avctx->colorspace);
++    if (value != COLOR_STANDARD_UNSPECIFIED)
++        ff_AMediaFormat_setInt32(format, "color-standard", value);
++
++    value = ff_AMediaFormatColorTransfer_from_AVColorTransfer(avctx->color_trc);
++    if (value != COLOR_TRANSFER_UNSPECIFIED)
++        ff_AMediaFormat_setInt32(format, "color-transfer", value);
++
++    sd = av_packet_side_data_get(avctx->coded_side_data, avctx->nb_coded_side_data,
++                                 AV_PKT_DATA_MASTERING_DISPLAY_METADATA);
++    if (sd && sd->size >= sizeof(AVMasteringDisplayMetadata)) {
++        const AVMasteringDisplayMetadata *mdm =
++            (const AVMasteringDisplayMetadata *)sd->data;
++
++        if (mdm->has_primaries && mdm->has_luminance) {
++            /* HDRStaticInfo Type 1 (CTA-861.3 static metadata descriptor,
++             * MediaFormat KEY_HDR_STATIC_INFO): one type byte followed by
++             * twelve little-endian uint16 values. */
++            uint8_t info[25], *p = info;
++            uint16_t max_cll = 0, max_fall = 0;
++
++            sd = av_packet_side_data_get(avctx->coded_side_data,
++                                         avctx->nb_coded_side_data,
++                                         AV_PKT_DATA_CONTENT_LIGHT_LEVEL);
++            if (sd && sd->size >= sizeof(AVContentLightMetadata)) {
++                const AVContentLightMetadata *clm =
++                    (const AVContentLightMetadata *)sd->data;
++                max_cll  = av_clip64(clm->MaxCLL,  0, UINT16_MAX);
++                max_fall = av_clip64(clm->MaxFALL, 0, UINT16_MAX);
++            }
++
++            *p++ = 0; /* type 1 */
++            for (int i = 0; i < 3; i++) {
++                /* R, G, B chromaticity in units of 0.00002 */
++                AV_WL16(p, hdr_info_u16(mdm->display_primaries[i][0], 50000)); p += 2;
++                AV_WL16(p, hdr_info_u16(mdm->display_primaries[i][1], 50000)); p += 2;
++            }
++            AV_WL16(p, hdr_info_u16(mdm->white_point[0], 50000)); p += 2;
++            AV_WL16(p, hdr_info_u16(mdm->white_point[1], 50000)); p += 2;
++            /* max luminance in cd/m2, min in units of 0.0001 cd/m2 */
++            AV_WL16(p, hdr_info_u16(mdm->max_luminance, 1));      p += 2;
++            AV_WL16(p, hdr_info_u16(mdm->min_luminance, 10000));  p += 2;
++            AV_WL16(p, max_cll);  p += 2;
++            AV_WL16(p, max_fall); p += 2;
++
++            ff_AMediaFormat_setBuffer(format, "hdr-static-info", info, sizeof(info));
++        }
++    }
++}
++
+ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
+ {
+     int ret;
+@@ -627,6 +700,8 @@ static av_cold int mediacodec_decode_init(AVCodecContext *avctx)
+     if (avctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+         ff_AMediaFormat_setInt32(format, "width", avctx->width);
+         ff_AMediaFormat_setInt32(format, "height", avctx->height);
++
++        mediacodec_set_color_info(avctx, format);
+     } else {
+         ff_AMediaFormat_setInt32(format, "channel-count", avctx->ch_layout.nb_channels);
+         ff_AMediaFormat_setInt32(format, "sample-rate", avctx->sample_rate);
