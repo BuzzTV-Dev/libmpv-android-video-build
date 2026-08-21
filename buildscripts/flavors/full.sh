@@ -89,6 +89,11 @@ cpuflags=
 	\
 	--enable-filter=overlay \
 	--enable-filter=equalizer \
+	--enable-filter=dynaudnorm \
+	--enable-filter=loudnorm \
+	--enable-filter=acompressor \
+	--enable-filter=bwdif \
+	--enable-filter=yadif \
 	\
 	--enable-protocol=async \
 	--enable-protocol=cache \
