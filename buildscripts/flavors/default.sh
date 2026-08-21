@@ -230,6 +230,10 @@ sed -i -e 's/#define FFMPEG_CONFIGURATION.*/#define FFMPEG_CONFIGURATION ""/' ..
 	--enable-filter=acompressor \
 	--enable-filter=bwdif \
 	--enable-filter=yadif \
+	--enable-filter=aresample \
+	--enable-filter=scale \
+	--enable-filter=aformat \
+	--enable-filter=format \
 	\
 	--enable-protocol=async \
 	--enable-protocol=cache \
