@@ -1,0 +1,67 @@
+Don't clamp spdif passthrough to the AudioTrack native output rate
+
+ao_audiotrack clamps every format to AudioTrack.getNativeOutputSampleRate,
+spdif included. E-AC-3, DTS-HD and TrueHD are carried as IEC 61937 at
+192000 Hz, above the native (mixer) rate AudioTrack reports (48000 Hz on
+the p6), so the AO opens at the native rate and player/audio.c rejects
+it:
+
+    requested format: 192000 Hz, stereo channels, spdif-eac3
+    AudioTrack.nativeOutputSampleRate = 48000
+    Passthrough format unsupported.
+
+and mpv falls back to PCM. Those codecs were therefore never passed
+through on Android, whatever audio-spdif said; any spdif format whose
+rate exceeds the native rate is refused the same way (48000 Hz AC-3 on a
+44100 Hz device, for instance).
+
+Skip the clamp for spdif formats. The rate of an IEC 61937 stream is set
+by the codec, not the mixer; if the device can't open it, AudioTrack
+creation fails and mpv falls back to PCM exactly as before.
+
+With the rate no longer rejected, the high bitrate formats (TrueHD,
+DTS-HD MA: 8 channels at 192000 Hz) would reach AudioTrack as a stereo
+track, which consumes a quarter of their byte rate. Open those with the
+7.1 mask. The Java API accepts a 7.1 IEC 61937 track since API 31 (S)
+and throws before that; either a throw or a HAL without an 8-channel
+IEC 61937 profile fails init, and mpv falls back to PCM.
+
+diff --git a/audio/out/ao_audiotrack.c b/audio/out/ao_audiotrack.c
+index f483ccc8e8..c8b936b8fe 100644
+--- a/audio/out/ao_audiotrack.c
++++ b/audio/out/ao_audiotrack.c
+@@ -673,7 +673,13 @@ static int init(struct ao *ao)
+         p->format = AudioFormat.ENCODING_PCM_16BIT;
+     }
+ 
+-    if (AudioTrack.getNativeOutputSampleRate) {
++    // The native output rate describes the PCM mixer, not the HDMI link.
++    // IEC 61937 is an exact bitstream whose rate is dictated by the codec
++    // (192000 Hz for E-AC-3, DTS-HD and TrueHD), so clamping it only makes
++    // player/audio.c reject the AO ("Passthrough format unsupported.") and
++    // fall back to PCM. If the device can't open the requested rate,
++    // AudioTrack creation fails below, which falls back the same way.
++    if (AudioTrack.getNativeOutputSampleRate && !af_fmt_is_spdif(ao->format)) {
+         jint samplerate = MP_JNI_CALL_STATIC_INT(
+             AudioTrack.clazz,
+             AudioTrack.getNativeOutputSampleRate,
+@@ -711,7 +717,18 @@ static int init(struct ao *ao)
+     };
+     static_assert(MP_ARRAY_SIZE(layout_map) == MP_ARRAY_SIZE(layouts), "");
+     if (p->format == AudioFormat.ENCODING_IEC61937) {
+-        p->channel_config = AudioFormat.CHANNEL_OUT_STEREO;
++        // High bitrate formats (TrueHD, DTS-HD MA) are carried as 8 channels
++        // at 192000 Hz. A stereo track would consume them at a quarter of
++        // their byte rate; Android accepts a 7.1 IEC 61937 track since API 31
++        // and refuses one before that, which fails init and falls back.
++        if (ao->channels.num == 8 && AudioFormat.CHANNEL_OUT_7POINT1_SURROUND) {
++            p->channel_config = AudioFormat.CHANNEL_OUT_7POINT1_SURROUND;
++        } else if (ao->channels.num == 2) {
++            p->channel_config = AudioFormat.CHANNEL_OUT_STEREO;
++        } else {
++            MP_ERR(ao, "unsupported spdif channel count: %d\n", ao->channels.num);
++            goto error;
++        }
+     } else {
+         struct mp_chmap_sel sel = {0};
+         for (int i = 0; i < MP_ARRAY_SIZE(layouts); i++) {
