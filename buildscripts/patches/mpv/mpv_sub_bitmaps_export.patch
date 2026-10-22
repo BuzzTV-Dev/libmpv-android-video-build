@@ -1,9 +1,12 @@
+diff --git a/include/mpv/client.h b/include/mpv/client.h
+index e6aa1385d5..7b584bc025 100644
 --- a/include/mpv/client.h
 +++ b/include/mpv/client.h
-@@ -1740,6 +1740,88 @@
+@@ -1739,6 +1739,91 @@ MPV_EXPORT void mpv_wakeup(mpv_handle *ctx);
+  */
  MPV_EXPORT int mpv_lavc_set_java_vm(void *vm);
  
- /**
++/**
 + * A single subtitle bitmap ("part"). Pixel data is 32 bit per pixel BGRA
 + * (native little endian: B is the first byte in memory, A the last) with
 + * premultiplied alpha, tightly packed (stride == w * 4).
@@ -73,7 +76,10 @@
 + * and when it deselects the subtitle track while playback is not running, as
 + * no callbacks are generated once playback stops.
 + *
-+ * Passing cb = NULL disables the callback again.
++ * Passing cb = NULL disables the callback again. Once this function returns,
++ * the previous callback is not running and will not be invoked again. It
++ * does not wait for the core thread, only for a callback in progress, so it
++ * can be called while the core thread is busy (e.g. blocked in a decoder).
 + */
 +MPV_EXPORT void mpv_set_sub_bitmaps_callback(mpv_handle *ctx,
 +                                             mpv_sub_bitmaps_callback cb,
@@ -85,11 +91,10 @@
 + */
 +MPV_EXPORT void mpv_sub_bitmaps_free(mpv_sub_bitmaps *subs);
 +
-+/**
+ /**
   * Set a custom function that should be called when there are new events. Use
   * this if blocking in mpv_wait_event() to wait for new events is not feasible.
-  *
-@@ -2023,6 +2105,10 @@
+@@ -2023,6 +2108,10 @@ MPV_DEFINE_SYM_PTR(mpv_wakeup)
  #define mpv_wakeup pfn_mpv_wakeup
  MPV_DEFINE_SYM_PTR(mpv_lavc_set_java_vm)
  #define mpv_lavc_set_java_vm pfn_mpv_lavc_set_java_vm
@@ -100,9 +105,11 @@
  MPV_DEFINE_SYM_PTR(mpv_set_wakeup_callback)
  #define mpv_set_wakeup_callback pfn_mpv_set_wakeup_callback
  MPV_DEFINE_SYM_PTR(mpv_wait_async_requests)
+diff --git a/player/client.c b/player/client.c
+index 7e8b4931bb..ddd79c7585 100644
 --- a/player/client.c
 +++ b/player/client.c
-@@ -971,6 +971,22 @@
+@@ -971,6 +971,25 @@ int mpv_lavc_set_java_vm(void *vm)
      return av_jni_set_java_vm(vm, NULL);
  }
  
@@ -110,11 +117,14 @@
 +                                  void *userdata)
 +{
 +    struct MPContext *mpctx = ctx->mpctx;
-+    mp_dispatch_lock(mpctx->dispatch);
++    // Not mp_dispatch_lock: that waits for the core thread, which may be stuck
++    // (e.g. in a decoder). The core holds sub_export_lock only briefly & while
++    // a callback runs, so once this returns the old one won't be invoked.
++    mp_mutex_lock(&mpctx->sub_export_lock);
 +    mpctx->sub_export_cb = cb;
 +    mpctx->sub_export_cb_ud = userdata;
 +    mpctx->sub_export_had_sub = false;
-+    mp_dispatch_unlock(mpctx->dispatch);
++    mp_mutex_unlock(&mpctx->sub_export_lock);
 +}
 +
 +void mpv_sub_bitmaps_free(mpv_sub_bitmaps *subs)
@@ -125,6 +135,8 @@
  // map client API types to internal types
  static const struct m_option type_conv[] = {
      [MPV_FORMAT_STRING]     = { .type = CONF_TYPE_STRING },
+diff --git a/player/core.h b/player/core.h
+index eb7f508cab..8098345f63 100644
 --- a/player/core.h
 +++ b/player/core.h
 @@ -35,6 +35,8 @@
@@ -136,12 +148,14 @@
  enum stop_play_reason {
      KEEP_PLAYING = 0,   // playback of a file is actually going on
                          // must be 0, numeric values of others do not matter
-@@ -276,6 +278,13 @@
+@@ -276,6 +278,15 @@ typedef struct MPContext {
      bool osd_show_pos;
      struct osd_progbar_state osd_progbar;
  
 +    // Custom subtitle bitmap export (see mpv_set_sub_bitmaps_callback()).
-+    // Written under mp_dispatch_lock, read from the core thread.
++    // cb, cb_ud & had_sub are protected by sub_export_lock, which is also held
++    // while cb runs; serial is only touched by the core thread.
++    mp_mutex sub_export_lock;
 +    void (*sub_export_cb)(void *userdata, struct mpv_sub_bitmaps *subs);
 +    void *sub_export_cb_ud;
 +    uint64_t sub_export_serial;
@@ -150,6 +164,28 @@
      struct playlist *playlist;
      struct playlist_entry *playing; // currently playing file
      char *filename; // immutable copy of playing->filename (or NULL)
+diff --git a/player/main.c b/player/main.c
+index 37eb6b18f5..a761919ce0 100644
+--- a/player/main.c
++++ b/player/main.c
+@@ -210,6 +210,7 @@ void mp_destroy(struct MPContext *mpctx)
+     mp_assert(!mpctx->num_abort_list);
+     talloc_free(mpctx->abort_list);
+     mp_mutex_destroy(&mpctx->abort_lock);
++    mp_mutex_destroy(&mpctx->sub_export_lock);
+     talloc_free(mpctx->mconfig); // destroy before dispatch
+     talloc_free(mpctx);
+ }
+@@ -283,6 +284,7 @@ struct MPContext *mp_create(void)
+     };
+ 
+     mp_mutex_init(&mpctx->abort_lock);
++    mp_mutex_init(&mpctx->sub_export_lock);
+ 
+     mpctx->global = talloc_zero(mpctx, struct mpv_global);
+ 
+diff --git a/player/sub.c b/player/sub.c
+index b5dcb0ceb5..63c9125b5d 100644
 --- a/player/sub.c
 +++ b/player/sub.c
 @@ -20,7 +20,10 @@
@@ -163,7 +199,7 @@
  #include "mpv_talloc.h"
  
  #include "common/msg.h"
-@@ -160,6 +163,95 @@
+@@ -160,6 +163,105 @@ static bool update_subtitle(struct MPContext *mpctx, double video_pts,
      return packets_read;
  }
  
@@ -203,8 +239,14 @@
 +        }
 +    }
 +
-+    mpctx->sub_export_had_sub = num > 0;
-+    mpctx->sub_export_cb(mpctx->sub_export_cb_ud, ev);
++    mp_mutex_lock(&mpctx->sub_export_lock);
++    if (mpctx->sub_export_cb) {
++        mpctx->sub_export_had_sub = num > 0;
++        mpctx->sub_export_cb(mpctx->sub_export_cb_ud, ev);
++    } else {
++        free(ev); // cleared since sub_export_update() looked
++    }
++    mp_mutex_unlock(&mpctx->sub_export_lock);
 +}
 +
 +// Feed the current primary subtitle bitmaps to the host application. This is
@@ -212,7 +254,11 @@
 +// else ever calls sub_get_bitmaps().
 +static void sub_export_update(struct MPContext *mpctx, double video_pts)
 +{
-+    if (!mpctx->sub_export_cb)
++    mp_mutex_lock(&mpctx->sub_export_lock);
++    bool enabled = mpctx->sub_export_cb;
++    bool had_sub = mpctx->sub_export_had_sub;
++    mp_mutex_unlock(&mpctx->sub_export_lock);
++    if (!enabled)
 +        return;
 +
 +    // update_subtitles() is reached with slightly different timestamps
@@ -248,9 +294,9 @@
 +    }
 +
 +    if (!sb || !sb->num_parts) {
-+        if (mpctx->sub_export_had_sub)
++        if (had_sub)
 +            sub_export_emit(mpctx, NULL, cw, ch);
-+    } else if (!mpctx->sub_export_had_sub || sb->change_id) {
++    } else if (!had_sub || sb->change_id) {
 +        sub_export_emit(mpctx, sb, cw, ch);
 +    }
 +    talloc_free(sb);
@@ -259,7 +305,7 @@
  // Return true if the subtitles for the given PTS are ready; false if the player
  // should wait for new demuxer data, and then should retry.
  bool update_subtitles(struct MPContext *mpctx, double video_pts)
-@@ -167,6 +259,7 @@
+@@ -167,6 +269,7 @@ bool update_subtitles(struct MPContext *mpctx, double video_pts)
      bool ok = true;
      for (int n = 0; n < num_ptracks[STREAM_SUB]; n++)
          ok &= update_subtitle(mpctx, video_pts, mpctx->current_track[n][STREAM_SUB]);
@@ -267,9 +313,11 @@
      return ok;
  }
  
+diff --git a/sub/dec_sub.c b/sub/dec_sub.c
+index 118221a658..7db3a1f2c5 100644
 --- a/sub/dec_sub.c
 +++ b/sub/dec_sub.c
-@@ -564,6 +564,15 @@
+@@ -564,6 +564,15 @@ bool sub_is_primary_visible(struct dec_sub *sub)
      return ret;
  }
  
@@ -285,9 +333,11 @@
  bool sub_is_secondary_visible(struct dec_sub *sub)
  {
      mp_mutex_lock(&sub->lock);
+diff --git a/sub/dec_sub.h b/sub/dec_sub.h
+index 476e83a3f5..28a86ab4e6 100644
 --- a/sub/dec_sub.h
 +++ b/sub/dec_sub.h
-@@ -57,6 +57,7 @@
+@@ -57,6 +57,7 @@ void sub_select(struct dec_sub *sub, bool selected);
  void sub_set_recorder_sink(struct dec_sub *sub, struct mp_recorder_sink *sink);
  void sub_set_play_dir(struct dec_sub *sub, int dir);
  bool sub_is_primary_visible(struct dec_sub *sub);
